@@ -162,3 +162,4 @@ cython_debug/
 *.mov
 /uploads
 file_log.csv
+modules/megaAccCreator.py
