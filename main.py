@@ -50,14 +50,18 @@ def get_thumbnail_base64(video_path):
             os.remove(thumbnail_temp)
     return base64_thumb
 
-def log_file_data(filename, uncompressed_size, compressed_size, video_path):
+
+def log_file_data(filename, uncompressed_size, compressed_size, video_path, mega_link="", mega_account=""):
     saved_bytes = uncompressed_size - compressed_size
     saved_percent = (saved_bytes / uncompressed_size * 100) if uncompressed_size else 0
     thumbnail_base64 = get_thumbnail_base64(video_path)
     log_exists = os.path.exists(LOG_CSV)
     
     with open(LOG_CSV, "a", newline="") as csvfile:
-        fieldnames = ["timestamp", "filename", "uncompressed_size", "compressed_size", "saved_bytes", "saved_percent", "thumbnail_base64"]
+        fieldnames = [
+            "timestamp", "filename", "uncompressed_size", "compressed_size",
+            "saved_bytes", "saved_percent", "thumbnail_base64", "mega_link", "mega_account"
+        ]
         writer = csv.DictWriter(csvfile, fieldnames=fieldnames)
         if not log_exists:
             writer.writeheader()
@@ -68,8 +72,14 @@ def log_file_data(filename, uncompressed_size, compressed_size, video_path):
             "compressed_size": compressed_size,
             "saved_bytes": saved_bytes,
             "saved_percent": f"{saved_percent:.2f}",
-            "thumbnail_base64": thumbnail_base64
+            "thumbnail_base64": thumbnail_base64,
+            "mega_link": mega_link,
+            "mega_account": mega_account
         })
+
+
+
+from flask import send_file
 
 @app.route('/update_metadata', methods=['POST'])
 def update_metadata():
@@ -77,69 +87,60 @@ def update_metadata():
     compressed_file = request.files.get('compressed')
     upload_to_mega_str = request.form.get('uploadToMega', 'false').lower()
     upload_to_mega = upload_to_mega_str in ['true', '1', 'yes']
-    
-    if not uncompressed_file or not compressed_file:
-        return jsonify({"error": "Missing files"}), 400
 
-    # Get file sizes (in bytes)
+    # Extract Mega account name and format correctly
+    mega_account = request.form.get('megaAccount', '').strip()
+    if mega_account and not mega_account.endswith(":"):
+        mega_account += ":"
+
+    if not uncompressed_file or not compressed_file:
+        return "Missing files", 400  # No JSON response, just an error message.
+
+    # Get file sizes
     uncompressed_file.seek(0, os.SEEK_END)
     uncompressed_size = uncompressed_file.tell()
     uncompressed_file.seek(0)
-    
+
     compressed_file.seek(0, os.SEEK_END)
     compressed_size = compressed_file.tell()
     compressed_file.seek(0)
-    
+
     total_size = uncompressed_size + compressed_size
     temp_dir = get_temp_directory(total_size)
-    
-    # Create temporary file paths in the chosen directory.
+
+    # Create temporary file paths
     uncompressed_path = os.path.join(temp_dir, "uncompressed_" + uncompressed_file.filename)
     compressed_path = os.path.join(temp_dir, compressed_file.filename)
-    
-    # Save both files.
+
+    # Save both files
     uncompressed_file.save(uncompressed_path)
     compressed_file.save(compressed_path)
-    
-    # Extract metadata from uncompressed file.
+
+    # Extract metadata from uncompressed file and apply to compressed
     metadata_command = f'"C:\\ExifTool\\exiftool.exe" -json "{uncompressed_path}"'
     try:
-        result = subprocess.run(metadata_command, shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=10)
-        metadata = result.stdout  # For debugging if needed
-        
-        # Apply extracted metadata to compressed file.
+        subprocess.run(metadata_command, shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=10)
+
         apply_command = f'"C:\\ExifTool\\exiftool.exe" -TagsFromFile "{uncompressed_path}" -All:All -overwrite_original "{compressed_path}"'
         subprocess.run(apply_command, shell=True, check=True, stdout=subprocess.PIPE, stderr=subprocess.PIPE, text=True, timeout=10)
-        
-        # Log file data.
-        log_file_data(compressed_file.filename, uncompressed_size, os.path.getsize(compressed_path), compressed_path)
-        
-        # Prepare Mega upload status.
-        mega_status = None
-        if upload_to_mega:
-            # Attempt to upload the uncompressed file.
-            mega_status = upload_uncompressed_file(uncompressed_path)
-        
-        # Delete the uncompressed file after processing (whether uploaded or not).
-        os.remove(uncompressed_path)
-        
-        # Build the response.
-        response_data = {
-            "success": True,
-            "message": "Metadata transferred successfully",
-            "compressed_file": compressed_file.filename,
-            "mega_upload_status": mega_status,  # This will be None if not requested.
-            "download_url": f"http://192.168.68.117:5000/download/{compressed_file.filename}"
-        }
-        
-        return jsonify(response_data)
-        
+
+        # Upload to Mega if requested
+        if upload_to_mega and mega_account:
+            upload_uncompressed_file(uncompressed_path, mega_account)
+
+        os.remove(uncompressed_path)  # Delete uncompressed file after processing
+
+        # ✅ **Return the video/photo file directly**
+        return send_file(compressed_path, as_attachment=True, download_name=compressed_file.filename)
+
     except subprocess.CalledProcessError as e:
-        return jsonify({"error": "ExifTool failed", "details": e.stderr}), 500
+        return "Metadata processing failed", 500
     except subprocess.TimeoutExpired:
-        return jsonify({"error": "ExifTool timed out"}), 500
-    except Exception as e:
-        return jsonify({"error": f"Unexpected error: {str(e)}"}), 500
+        return "Metadata processing timed out", 500
+    except Exception:
+        return "Unexpected error", 500
+
+
 
 # Route to serve the compressed file.
 @app.route('/download/<filename>', methods=['GET'])
