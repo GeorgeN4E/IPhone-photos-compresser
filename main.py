@@ -1,3 +1,6 @@
+#https://www.icloud.com/shortcuts/3644a5e925f44e1889ed09905252621d
+#https://www.reddit.com/r/ios/comments/1211d4y/how_to_quickly_reduce_video_size/
+
 from flask import Flask, request, jsonify, send_file
 import subprocess
 import os
